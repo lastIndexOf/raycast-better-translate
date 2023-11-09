@@ -9,7 +9,7 @@
   "license": "MIT",
   "commands": [
     {
-      "name": "index",
+      "name": "word-translate",
       "title": "Translate",
       "subtitle": "word translation",
       "description": "Translate the selected word.",
@@ -17,7 +17,8 @@
     }
   ],
   "dependencies": {
-    "@raycast/api": "^1.61.2"
+    "@raycast/api": "^1.61.2",
+    "@raycast/utils": "^1.10.1"
   },
   "devDependencies": {
     "@raycast/eslint-config": "^1.0.6",
