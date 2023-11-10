@@ -1,54 +1,199 @@
-#![allow(clippy::single_match)]
+use std::collections::HashMap;
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::EventLoop,
+    window::{Window, WindowId},
+};
 
-use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
-use screenshots::Screen;
+struct ViewportDesc {
+    window: Window,
+    background: wgpu::Color,
+    surface: wgpu::Surface,
+}
 
-const WIDTH: usize = 640;
-const HEIGHT: usize = 360;
+struct Viewport {
+    desc: ViewportDesc,
+    config: wgpu::SurfaceConfiguration,
+}
 
-fn main() -> anyhow::Result<()> {
-    println!("{:#?}", Screen::all());
-    // let current_screen = 
-
-    let screen = Screen::from_point(0, 0)?;
-    let img = screen.capture_area(0, 0, WIDTH as u32, HEIGHT as u32)?;
-
-    let (width, height) = img.dimensions();
-    let buffer: Vec<u32> = img
-        .into_raw()
-        .chunks_exact(4)
-        .map(|p| {
-            ((p[3] as u32) << 24) | ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32)
-        })
-        .collect();
-
-    let mut window = Window::new(
-        "Screenshot",
-        WIDTH,
-        HEIGHT,
-        WindowOptions {
-            title: false,
-            borderless: false,
-            topmost: true,
-            ..WindowOptions::default()
-        },
-    )?;
-
-    // Limit to max ~60 fps update rate
-    window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
-
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        if let Some((x, y)) = window.get_mouse_pos(MouseMode::Discard) {
-            // println!("Mouse Position: x: {}, y: {}", x, y);
+impl ViewportDesc {
+    fn new(window: Window, background: wgpu::Color, instance: &wgpu::Instance) -> Self {
+        let surface = unsafe { instance.create_surface(&window) }.unwrap();
+        Self {
+            window,
+            background,
+            surface,
         }
-
-        // Get mouse button state
-        if window.get_mouse_down(MouseButton::Left) {
-            println!("Mouse Button Left Down");
-        }
-
-        window.update_with_buffer(&buffer, width as usize, height as usize)?;
     }
 
-    Ok(())
+    fn build(self, adapter: &wgpu::Adapter, device: &wgpu::Device) -> Viewport {
+        let size = self.window.inner_size();
+
+        let caps = self.surface.get_capabilities(adapter);
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: caps.formats[0],
+            width: size.width,
+            height: size.height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+
+        self.surface.configure(device, &config);
+
+        Viewport { desc: self, config }
+    }
+}
+
+impl Viewport {
+    fn resize(&mut self, device: &wgpu::Device, size: winit::dpi::PhysicalSize<u32>) {
+        self.config.width = size.width;
+        self.config.height = size.height;
+        self.desc.surface.configure(device, &self.config);
+    }
+    fn get_current_texture(&mut self) -> wgpu::SurfaceTexture {
+        self.desc
+            .surface
+            .get_current_texture()
+            .expect("Failed to acquire next swap chain texture")
+    }
+}
+
+async fn run(event_loop: EventLoop<()>, viewports: Vec<(Window, wgpu::Color)>) {
+    let instance = wgpu::Instance::default();
+    let viewports: Vec<_> = viewports
+        .into_iter()
+        .map(|(window, color)| ViewportDesc::new(window, color, &instance))
+        .collect();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            // Request an adapter which can render to our surface
+            compatible_surface: viewports.first().map(|desc| &desc.surface),
+            ..Default::default()
+        })
+        .await
+        .expect("Failed to find an appropriate adapter");
+
+    // Create the logical device and command queue
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: None,
+                features: wgpu::Features::empty(),
+                limits: wgpu::Limits::downlevel_defaults(),
+            },
+            None,
+        )
+        .await
+        .expect("Failed to create device");
+
+    let mut viewports: HashMap<WindowId, Viewport> = viewports
+        .into_iter()
+        .map(|desc| (desc.window.id(), desc.build(&adapter, &device)))
+        .collect();
+
+    event_loop
+        .run(move |event, target| {
+            // Have the closure take ownership of the resources.
+            // `event_loop.run` never returns, therefore we must do this to ensure
+            // the resources are properly cleaned up.
+            let _ = (&instance, &adapter);
+
+            if let Event::WindowEvent { window_id, event } = event {
+                match event {
+                    WindowEvent::Resized(new_size) => {
+                        // Recreate the swap chain with the new size
+                        if let Some(viewport) = viewports.get_mut(&window_id) {
+                            viewport.resize(&device, new_size);
+                            // On macos the window needs to be redrawn manually after resizing
+                            viewport.desc.window.request_redraw();
+                        }
+                    }
+                    WindowEvent::RedrawRequested => {
+                        if let Some(viewport) = viewports.get_mut(&window_id) {
+                            let frame = viewport.get_current_texture();
+                            let view = frame
+                                .texture
+                                .create_view(&wgpu::TextureViewDescriptor::default());
+                            let mut encoder =
+                                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: None,
+                                });
+                            {
+                                let _rpass =
+                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                        label: None,
+                                        color_attachments: &[Some(
+                                            wgpu::RenderPassColorAttachment {
+                                                view: &view,
+                                                resolve_target: None,
+                                                ops: wgpu::Operations {
+                                                    load: wgpu::LoadOp::Clear(
+                                                        viewport.desc.background,
+                                                    ),
+                                                    store: wgpu::StoreOp::Store,
+                                                },
+                                            },
+                                        )],
+                                        depth_stencil_attachment: None,
+                                        timestamp_writes: None,
+                                        occlusion_query_set: None,
+                                    });
+                            }
+
+                            queue.submit(Some(encoder.finish()));
+                            frame.present();
+                        }
+                    }
+                    WindowEvent::CloseRequested => {
+                        viewports.remove(&window_id);
+                        if viewports.is_empty() {
+                            target.exit();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .unwrap();
+}
+
+fn main() {
+    const WINDOW_SIZE: u32 = 128;
+    const WINDOW_PADDING: u32 = 16;
+    const WINDOW_TITLEBAR: u32 = 32;
+    const WINDOW_OFFSET: u32 = WINDOW_SIZE + WINDOW_PADDING;
+    const ROWS: u32 = 4;
+    const COLUMNS: u32 = 4;
+
+    let event_loop = EventLoop::new().unwrap();
+    let mut viewports = Vec::with_capacity((ROWS * COLUMNS) as usize);
+    for row in 0..ROWS {
+        for column in 0..COLUMNS {
+            let window = winit::window::WindowBuilder::new()
+                .with_title(format!("x{column}y{row}"))
+                .with_inner_size(winit::dpi::PhysicalSize::new(WINDOW_SIZE, WINDOW_SIZE))
+                .build(&event_loop)
+                .unwrap();
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(
+                WINDOW_PADDING + column * WINDOW_OFFSET,
+                WINDOW_PADDING + row * (WINDOW_OFFSET + WINDOW_TITLEBAR),
+            ));
+            fn frac(index: u32, max: u32) -> f64 {
+                index as f64 / max as f64
+            }
+            viewports.push((
+                window,
+                wgpu::Color {
+                    r: frac(row, ROWS),
+                    g: 0.5 - frac(row * column, ROWS * COLUMNS) * 0.5,
+                    b: frac(column, COLUMNS),
+                    a: 1.0,
+                },
+            ))
+        }
+    }
+
+    futures::executor::block_on(run(event_loop, viewports));
 }

@@ -17,5 +17,5 @@ delay 0.05
 
   await Clipboard.copy(originalContent);
 
-  return selectionWord;
+  return selectionWord ?? "";
 };
