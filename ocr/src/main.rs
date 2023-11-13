@@ -1,10 +1,15 @@
+use std::ffi::c_void;
+use std::time::Instant;
+
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSBackingStoreBuffered, NSImage,
     NSImageView, NSView, NSWindow, NSWindowStyleMask,
 };
 use cocoa::base::{nil, NO};
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
+use cocoa::foundation::{NSAutoreleasePool, NSData, NSPoint, NSRect, NSSize, NSUInteger};
 use core_graphics::display::{CGDisplay, CGDisplayBounds};
+use screenshots::image::codecs::png::PngEncoder;
+use screenshots::image::{ColorType, ImageEncoder};
 use screenshots::Screen;
 
 fn main() -> anyhow::Result<()> {
@@ -26,21 +31,6 @@ fn main() -> anyhow::Result<()> {
         let mut offset = (0.0, None);
         for display in displays {
             if let Some(screen) = screens.iter().find(|ele| ele.display_info.id == display) {
-                // 截屏
-                let mut image = screen.capture().unwrap();
-                // let (width, height) = image.dimensions();
-                // let raw_image = image.into_raw();
-
-                // 截屏区域
-                // let image = screen.capture_area(
-                //     0,
-                //     0,
-                //     screen.display_info.width,
-                //     screen.display_info.height,
-                // )?;
-
-                image.save("./target.png")?;
-
                 let screen_rect = CGDisplayBounds(display);
                 let screen_size = NSSize::new(
                     screen_rect.size.width as f64,
@@ -61,12 +51,31 @@ fn main() -> anyhow::Result<()> {
                     )
                     .autorelease();
 
-                let path = NSString::alloc(nil).init_str("./target.png");
+                let now = Instant::now();
+                // 截屏
+                let image = screen.capture().unwrap();
+                let (width, height) = image.dimensions();
+                println!("capture time: {:?}", now.elapsed());
 
-                // 使用NSImage加载图片
-                let image = NSImage::alloc(nil).initByReferencingFile_(path);
+                // 截屏区域
+                // let image = screen.capture_area(
+                //     0,
+                //     0,
+                //     screen.display_info.width,
+                //     screen.display_info.height,
+                // )?;
+                // image.save("./target.png")?;
+                // let path = NSString::alloc(nil).init_str("./target.png");
+                // let image = NSImage::alloc(nil).initByReferencingFile_(path);
 
-                // 创建 NSImageView 并设置图像
+                // Encode ImageBuffer to png
+                let mut png_data = Vec::new();
+                let encoder = PngEncoder::new(&mut png_data);
+                encoder.write_image(&image.into_raw(), width, height, ColorType::Rgba8)?;
+                let data_ptr = png_data.as_ptr() as *const c_void;
+                let data_len = png_data.len() as NSUInteger;
+                let ns_data = NSData::dataWithBytes_length_(nil, data_ptr, data_len);
+                let image = NSImage::initWithData_(NSImage::alloc(nil), ns_data).autorelease();
                 let image_view = NSView::initWithFrame_(
                     NSImageView::alloc(nil),
                     NSWindow::frame(window.contentView()),
