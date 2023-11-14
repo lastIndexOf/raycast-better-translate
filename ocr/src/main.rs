@@ -89,17 +89,19 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                extern "C" fn draw_rect(this: &Object, _sel: Sel, _rect: NSRect) {
+                extern "C" fn draw_rect(_this: &Object, _sel: Sel, _dirty_rect: NSRect) {
                     unsafe {
                         let blue: id = msg_send![class!(NSColor), colorWithCalibratedRed:0.0 green:0.0 blue:1.0 alpha:0.1];
                         let _: () = msg_send![blue, setFill];
-                        let rect = msg_send![NSMakeRect, 0.0, 0., 300., 300.];
+                        let rect_to_draw =
+                            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(100.0, 100.0));
+
                         // NSRectFill(NSRect::new(
                         //     NSPoint::new(0., 0.),
                         //     NSSize::new(300.0, 300.0),
                         // ));
-                        println!("({}, {})", _rect.size.width, _rect.size.height);
-                        NSRectFill(_rect);
+                        // NSRectFill(_dirty_rect);
+                        NSRectFill(rect_to_draw);
                     }
                 }
                 let cls_name = format!("Display{display}EventHandlerView");
