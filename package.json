@@ -9,6 +9,13 @@
   "license": "MIT",
   "commands": [
     {
+      "name": "word-translate",
+      "title": "Selection Word Translate",
+      "subtitle": "Word Translation",
+      "description": "Word translation",
+      "mode": "no-view"
+    },
+    {
       "name": "ocr-translate",
       "title": "OCR Translate",
       "subtitle": "OCR Translation",

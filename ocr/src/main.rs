@@ -5,12 +5,47 @@ use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSBackingStoreBuffered, NSImage,
     NSImageView, NSView, NSWindow, NSWindowStyleMask,
 };
-use cocoa::base::{nil, NO};
+use cocoa::base::{id, nil, NO};
 use cocoa::foundation::{NSAutoreleasePool, NSData, NSPoint, NSRect, NSSize, NSUInteger};
 use core_graphics::display::{CGDisplay, CGDisplayBounds};
+use objc::declare::ClassDecl;
+use objc::runtime::{Class, Object, Sel};
+use objc::{msg_send, sel, sel_impl};
 use screenshots::image::codecs::png::PngEncoder;
 use screenshots::image::{ColorType, ImageEncoder};
 use screenshots::Screen;
+
+extern "C" fn mouse_down(_this: &Object, _sel: Sel, event: id) {
+    println!("Mouse button pressed.");
+}
+
+extern "C" fn mouse_dragged(_this: &Object, _sel: Sel, event: id) {
+    println!("Mouse dragged.");
+}
+
+extern "C" fn mouse_up(_this: &Object, _sel: Sel, event: id) {
+    println!("Mouse button released.");
+}
+
+unsafe fn create_custom_view_class(view_id: u32) -> *mut Object {
+    let cls_name = format!("Display{view_id}EventHandlerClass");
+    let superclass = Class::get("NSView").unwrap();
+    let mut decl = ClassDecl::new(&cls_name, superclass).unwrap();
+
+    decl.add_method(
+        sel!(mouseDown:),
+        mouse_down as extern "C" fn(&Object, Sel, id),
+    );
+    decl.add_method(
+        sel!(mouseDragged:),
+        mouse_dragged as extern "C" fn(&Object, Sel, id),
+    );
+    decl.add_method(sel!(mouseUp:), mouse_up as extern "C" fn(&Object, Sel, id));
+
+    let my_view_class = decl.register();
+
+    msg_send![my_view_class, new]
+}
 
 fn main() -> anyhow::Result<()> {
     let screens = Screen::all().unwrap();
@@ -51,9 +86,11 @@ fn main() -> anyhow::Result<()> {
                     )
                     .autorelease();
 
+                window.setContentView_(create_custom_view_class(display));
+
                 let now = Instant::now();
                 // 截屏
-                let image = screen.capture().unwrap();
+                let image = screen.capture()?;
                 let (width, height) = image.dimensions();
                 println!("capture time: {:?}", now.elapsed());
 
