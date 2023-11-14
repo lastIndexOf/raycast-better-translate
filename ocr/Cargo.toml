@@ -11,4 +11,3 @@ core-graphics = "0.23.1"
 cocoa = "0.25.0"
 objc = "0.2.7"
 anyhow = "1.0.75"
-
