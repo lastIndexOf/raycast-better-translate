@@ -16,6 +16,7 @@ use lazy_static::lazy_static;
 use objc::declare::ClassDecl;
 use objc::rc::StrongPtr;
 use objc::runtime::{Class, Object, Sel, YES};
+use objc::Encode;
 use objc::{class, msg_send, sel, sel_impl};
 use rand::rngs::ThreadRng;
 use rand::{Rng, RngCore};
@@ -29,10 +30,6 @@ struct State {
     start_point: Option<(f64, f64)>,
     end_point: Option<(f64, f64)>,
     pressed: bool,
-}
-
-lazy_static! {
-    static ref GLOBAL_STATE: Arc<Mutex<Vec<State>>> = Arc::new(Mutex::new(vec![]));
 }
 
 fn main() -> anyhow::Result<()> {
@@ -61,8 +58,6 @@ fn main() -> anyhow::Result<()> {
                     pressed: false,
                 };
 
-                GLOBAL_STATE.lock().unwrap().push(state);
-
                 let screen_rect = CGDisplayBounds(display);
                 let screen_size = NSSize::new(
                     screen_rect.size.width as f64,
@@ -86,10 +81,15 @@ fn main() -> anyhow::Result<()> {
                 extern "C" fn mouse_down(_this: &Object, _sel: Sel, _event: id) {
                     unsafe {
                         let mouse_location = NSEvent::mouseLocation(nil);
-                        println!(
-                            "Mouse button pressed at x: {}, y: {}",
-                            mouse_location.x, mouse_location.y,
-                        );
+
+                        {
+                            let state_ptr: *mut c_void = *_this.get_ivar("display_state");
+                            let state = Box::from_raw(state_ptr as *mut State);
+                            println!(
+                                "Mouse button pressed at x: {}, y: {}, {:?}",
+                                mouse_location.x, mouse_location.y, state
+                            );
+                        }
 
                         let subviews: id = msg_send![_this, subviews];
                         let enumerator: id = msg_send![subviews, objectEnumerator];
@@ -166,6 +166,7 @@ fn main() -> anyhow::Result<()> {
                     sel!(drawRect:),
                     draw_rect as extern "C" fn(&Object, Sel, NSRect),
                 );
+
                 let my_view_class = decl.register();
                 let custom_view: id = msg_send![my_view_class, new];
 
@@ -181,8 +182,15 @@ fn main() -> anyhow::Result<()> {
                     sel!(mouseDragged:),
                     mouse_dragged as extern "C" fn(&Object, Sel, id),
                 );
+                content_view.add_ivar::<*mut c_void>("display_state");
                 let content_view_class = content_view.register();
                 let content_view: id = msg_send![content_view_class, new];
+
+                (*content_view).set_ivar(
+                    "display_state",
+                    Box::into_raw(Box::new(state)) as *mut c_void,
+                );
+
                 window.setContentView_(content_view);
 
                 let now = Instant::now();
