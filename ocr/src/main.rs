@@ -1,41 +1,34 @@
-use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-
 use cocoa::appkit::{
-    NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSBackingStoreBuffered, NSColor,
-    NSEvent, NSImage, NSImageView, NSRectFill, NSView, NSWindow, NSWindowStyleMask,
+    NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSBackingStoreBuffered, NSEvent,
+    NSImage, NSImageView, NSRectFill, NSView, NSWindow, NSWindowStyleMask,
 };
 use cocoa::base::{id, nil, NO};
-use cocoa::foundation::{NSAutoreleasePool, NSData, NSPoint, NSRect, NSSize, NSUInteger};
-use core_graphics::context::CGContextRef;
+use cocoa::foundation::{NSAutoreleasePool, NSData, NSPoint, NSRect, NSSize, NSString, NSUInteger};
 use core_graphics::display::{CGDisplay, CGDisplayBounds};
-use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-use core_graphics::sys::CGContext;
-use lazy_static::lazy_static;
 use objc::declare::ClassDecl;
-use objc::rc::StrongPtr;
-use objc::runtime::{Class, Object, Sel, YES};
-use objc::Encode;
+use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
-use rand::rngs::ThreadRng;
-use rand::{Rng, RngCore};
 use screenshots::image::codecs::png::PngEncoder;
 use screenshots::image::{ColorType, ImageEncoder};
 use screenshots::Screen;
+use std::ffi::{c_char, c_void, CStr};
 
 #[derive(Debug)]
-struct State {
-    id: u32,
+struct State<'a> {
     start_point: Option<(f64, f64)>,
     end_point: Option<(f64, f64)>,
     pressed: bool,
+    screen: &'a Screen,
+    capture_area: Option<(f64, f64, f64, f64)>,
 }
 
 fn main() -> anyhow::Result<()> {
     let screens = Screen::all().unwrap();
 
     unsafe {
+        // TODO 解决多屏幕问题
+        // TODO 重构代码
+        // TODO 添加键盘事件
         // 创建自动释放池
         let _pool = NSAutoreleasePool::new(nil);
 
@@ -52,11 +45,14 @@ fn main() -> anyhow::Result<()> {
         for display in displays {
             if let Some(screen) = screens.iter().find(|ele| ele.display_info.id == display) {
                 let state = State {
-                    id: display,
                     start_point: None,
                     end_point: None,
                     pressed: false,
+                    screen: &screen,
+                    capture_area: None,
                 };
+
+                let shared_state = Box::into_raw(Box::new(state));
 
                 let screen_rect = CGDisplayBounds(display);
                 let screen_size = NSSize::new(
@@ -84,11 +80,12 @@ fn main() -> anyhow::Result<()> {
 
                         {
                             let state_ptr: *mut c_void = *_this.get_ivar("display_state");
-                            let state = Box::from_raw(state_ptr as *mut State);
-                            println!(
-                                "Mouse button pressed at x: {}, y: {}, {:?}",
-                                mouse_location.x, mouse_location.y, state
-                            );
+                            let mut state = Box::from_raw(state_ptr as *mut State);
+
+                            state.start_point = Some((mouse_location.x, mouse_location.y));
+                            state.pressed = true;
+
+                            let _ = Box::into_raw(state);
                         }
 
                         let subviews: id = msg_send![_this, subviews];
@@ -105,31 +102,43 @@ fn main() -> anyhow::Result<()> {
                 }
                 extern "C" fn mouse_up(_this: &Object, _sel: Sel, _event: id) {
                     unsafe {
-                        let mouse_location = NSEvent::mouseLocation(nil);
-                        println!(
-                            "Mouse button released at x: {}, y: {}",
-                            mouse_location.x, mouse_location.y
-                        );
+                        {
+                            let state_ptr: *mut c_void = *_this.get_ivar("display_state");
+                            let mut state = Box::from_raw(state_ptr as *mut State);
 
-                        let subviews: id = msg_send![_this, subviews];
-                        let enumerator: id = msg_send![subviews, objectEnumerator];
-                        let mut subview: id;
+                            state.start_point = None;
+                            state.end_point = None;
+                            state.pressed = false;
 
-                        while {
-                            subview = msg_send![enumerator, nextObject];
-                            subview != nil
-                        } {
-                            let _: () = msg_send![subview, setNeedsDisplay:true];
+                            if let Some((ox, oy, px, py)) = state.capture_area {
+                                println!("{:?}", state.capture_area);
+                                // 截屏区域
+                                let image = state
+                                    .screen
+                                    .capture_area(ox as i32, oy as i32, px as u32, py as u32)
+                                    .expect("capture area error");
+
+                                image.save("./target.png").expect("save image error");
+                            }
+
+                            let _ = Box::into_raw(state);
+
+                            std::process::exit(0);
                         }
                     }
                 }
                 extern "C" fn mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
                     unsafe {
                         let mouse_location = NSEvent::mouseLocation(nil);
-                        println!(
-                            "Mouse moved at x: {}, y: {}",
-                            mouse_location.x, mouse_location.y
-                        );
+
+                        {
+                            let state_ptr: *mut c_void = *_this.get_ivar("display_state");
+                            let mut state = Box::from_raw(state_ptr as *mut State);
+
+                            state.end_point = Some((mouse_location.x, mouse_location.y));
+
+                            let _ = Box::into_raw(state);
+                        }
 
                         let subviews: id = msg_send![_this, subviews];
                         let enumerator: id = msg_send![subviews, objectEnumerator];
@@ -143,20 +152,63 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                extern "C" fn key_down(_this: &Object, _sel: Sel, event: id) {
+                    unsafe {
+                        println!("@@@@@@");
+
+                        let characters: id = msg_send![event, characters];
+                        let characters_ptr: *const c_char = msg_send![characters, UTF8String];
+                        let key_string = CStr::from_ptr(characters_ptr)
+                            .to_string_lossy()
+                            .into_owned();
+
+                        println!("Key {} is pressed", key_string);
+
+                        // Check if the key string contains the escape character
+                        if key_string == "\u{1b}" {
+                            println!("ESC key is pressed.");
+                            // Perform your action here
+                        }
+                    }
+                }
 
                 extern "C" fn draw_rect(_this: &Object, _sel: Sel, _dirty_rect: NSRect) {
                     unsafe {
-                        println!("drawing rect");
-                        let mut random = rand::thread_rng();
-                        let next_w = random.gen_range(0.0..2000.);
-                        let next_h = random.gen_range(0.0..2000.);
+                        let state_ptr: *mut c_void = *_this.get_ivar("display_state");
+                        let mut state = Box::from_raw(state_ptr as *mut State);
+
+                        let capture_area = match state.as_ref() {
+                            State {
+                                start_point: Some((x1, y1)),
+                                end_point: Some((x2, y2)),
+                                pressed: true,
+                                ..
+                            } => {
+                                if x1 < x2 && y1 < y2 {
+                                    (*x1, *y1, x2 - x1, y2 - y1)
+                                } else if x1 < x2 && y1 > y2 {
+                                    (*x1, *y2, x2 - x1, y1 - y2)
+                                } else if x1 > x2 && y1 < y2 {
+                                    (*x2, *y1, x1 - x2, y2 - y1)
+                                } else {
+                                    (*x2, *y2, x1 - x2, y1 - y2)
+                                }
+                            }
+                            _ => {
+                                let _ = Box::into_raw(state);
+                                return;
+                            }
+                        };
+                        state.capture_area = Some(capture_area);
+                        let (ox, oy, px, py) = capture_area;
 
                         let blue: id = msg_send![class!(NSColor), colorWithCalibratedRed:0.0 green:0.0 blue:1.0 alpha:0.1];
                         let _: () = msg_send![blue, setFill];
-                        let rect_to_draw =
-                            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(next_w, next_h));
+                        let rect_to_draw = NSRect::new(NSPoint::new(ox, oy), NSSize::new(px, py));
 
                         NSRectFill(rect_to_draw);
+
+                        let _ = Box::into_raw(state);
                     }
                 }
                 let cls_name = format!("Display{display}CaptureView");
@@ -166,6 +218,8 @@ fn main() -> anyhow::Result<()> {
                     sel!(drawRect:),
                     draw_rect as extern "C" fn(&Object, Sel, NSRect),
                 );
+
+                decl.add_ivar::<*mut c_void>("display_state");
 
                 let my_view_class = decl.register();
                 let custom_view: id = msg_send![my_view_class, new];
@@ -182,33 +236,19 @@ fn main() -> anyhow::Result<()> {
                     sel!(mouseDragged:),
                     mouse_dragged as extern "C" fn(&Object, Sel, id),
                 );
+                content_view
+                    .add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
                 content_view.add_ivar::<*mut c_void>("display_state");
                 let content_view_class = content_view.register();
                 let content_view: id = msg_send![content_view_class, new];
 
-                (*content_view).set_ivar(
-                    "display_state",
-                    Box::into_raw(Box::new(state)) as *mut c_void,
-                );
-
+                (*custom_view).set_ivar("display_state", shared_state as *mut c_void);
+                (*content_view).set_ivar("display_state", shared_state as *mut c_void);
                 window.setContentView_(content_view);
 
-                let now = Instant::now();
                 // 截屏
                 let image = screen.capture()?;
                 let (width, height) = image.dimensions();
-                println!("capture time: {:?}", now.elapsed());
-
-                // 截屏区域
-                // let image = screen.capture_area(
-                //     0,
-                //     0,
-                //     screen.display_info.width,
-                //     screen.display_info.height,
-                // )?;
-                // image.save("./target.png")?;
-                // let path = NSString::alloc(nil).init_str("./target.png");
-                // let image = NSImage::alloc(nil).initByReferencingFile_(path);
 
                 // Encode ImageBuffer to png
                 let mut png_data = Vec::new();
