@@ -118,7 +118,11 @@ fn main() -> anyhow::Result<()> {
                                     .capture_area(ox as i32, oy as i32, px as u32, py as u32)
                                     .expect("capture area error");
 
-                                image.save("./target.png").expect("save image error");
+                                let target = "/tmp/raycast-better-ocr-target.png";
+
+                                println!("save ocr image to {}", target);
+
+                                image.save(target).expect("save image error");
                             }
 
                             let _ = Box::into_raw(state);
