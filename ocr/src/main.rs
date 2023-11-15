@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cocoa::appkit::{
@@ -11,18 +12,27 @@ use core_graphics::context::CGContextRef;
 use core_graphics::display::{CGDisplay, CGDisplayBounds};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::sys::CGContext;
+use lazy_static::lazy_static;
 use objc::declare::ClassDecl;
 use objc::rc::StrongPtr;
-use objc::runtime::{Class, Object, Sel};
+use objc::runtime::{Class, Object, Sel, YES};
 use objc::{class, msg_send, sel, sel_impl};
+use rand::rngs::ThreadRng;
+use rand::{Rng, RngCore};
 use screenshots::image::codecs::png::PngEncoder;
 use screenshots::image::{ColorType, ImageEncoder};
 use screenshots::Screen;
 
+#[derive(Debug)]
 struct State {
+    id: u32,
     start_point: Option<(f64, f64)>,
     end_point: Option<(f64, f64)>,
     pressed: bool,
+}
+
+lazy_static! {
+    static ref GLOBAL_STATE: Arc<Mutex<Vec<State>>> = Arc::new(Mutex::new(vec![]));
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,10 +55,13 @@ fn main() -> anyhow::Result<()> {
         for display in displays {
             if let Some(screen) = screens.iter().find(|ele| ele.display_info.id == display) {
                 let state = State {
+                    id: display,
                     start_point: None,
                     end_point: None,
                     pressed: false,
                 };
+
+                GLOBAL_STATE.lock().unwrap().push(state);
 
                 let screen_rect = CGDisplayBounds(display);
                 let screen_size = NSSize::new(
@@ -75,49 +88,102 @@ fn main() -> anyhow::Result<()> {
                         let mouse_location = NSEvent::mouseLocation(nil);
                         println!(
                             "Mouse button pressed at x: {}, y: {}",
-                            mouse_location.x, mouse_location.y
+                            mouse_location.x, mouse_location.y,
                         );
+
+                        let subviews: id = msg_send![_this, subviews];
+                        let enumerator: id = msg_send![subviews, objectEnumerator];
+                        let mut subview: id;
+
+                        while {
+                            subview = msg_send![enumerator, nextObject];
+                            subview != nil
+                        } {
+                            let _: () = msg_send![subview, setNeedsDisplay:true];
+                        }
                     }
                 }
                 extern "C" fn mouse_up(_this: &Object, _sel: Sel, _event: id) {
                     unsafe {
                         let mouse_location = NSEvent::mouseLocation(nil);
                         println!(
-                            "Mouse button pressed at x: {}, y: {}",
+                            "Mouse button released at x: {}, y: {}",
                             mouse_location.x, mouse_location.y
                         );
+
+                        let subviews: id = msg_send![_this, subviews];
+                        let enumerator: id = msg_send![subviews, objectEnumerator];
+                        let mut subview: id;
+
+                        while {
+                            subview = msg_send![enumerator, nextObject];
+                            subview != nil
+                        } {
+                            let _: () = msg_send![subview, setNeedsDisplay:true];
+                        }
+                    }
+                }
+                extern "C" fn mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
+                    unsafe {
+                        let mouse_location = NSEvent::mouseLocation(nil);
+                        println!(
+                            "Mouse moved at x: {}, y: {}",
+                            mouse_location.x, mouse_location.y
+                        );
+
+                        let subviews: id = msg_send![_this, subviews];
+                        let enumerator: id = msg_send![subviews, objectEnumerator];
+                        let mut subview: id;
+
+                        while {
+                            subview = msg_send![enumerator, nextObject];
+                            subview != nil
+                        } {
+                            let _: () = msg_send![subview, setNeedsDisplay:true];
+                        }
                     }
                 }
 
                 extern "C" fn draw_rect(_this: &Object, _sel: Sel, _dirty_rect: NSRect) {
                     unsafe {
+                        println!("drawing rect");
+                        let mut random = rand::thread_rng();
+                        let next_w = random.gen_range(0.0..2000.);
+                        let next_h = random.gen_range(0.0..2000.);
+
                         let blue: id = msg_send![class!(NSColor), colorWithCalibratedRed:0.0 green:0.0 blue:1.0 alpha:0.1];
                         let _: () = msg_send![blue, setFill];
                         let rect_to_draw =
-                            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(100.0, 100.0));
+                            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(next_w, next_h));
 
-                        // NSRectFill(NSRect::new(
-                        //     NSPoint::new(0., 0.),
-                        //     NSSize::new(300.0, 300.0),
-                        // ));
-                        // NSRectFill(_dirty_rect);
                         NSRectFill(rect_to_draw);
                     }
                 }
-                let cls_name = format!("Display{display}EventHandlerView");
+                let cls_name = format!("Display{display}CaptureView");
                 let superclass = Class::get("NSView").unwrap();
                 let mut decl = ClassDecl::new(&cls_name, superclass).unwrap();
-                decl.add_method(
-                    sel!(mouseDown:),
-                    mouse_down as extern "C" fn(&Object, Sel, id),
-                );
-                decl.add_method(sel!(mouseUp:), mouse_up as extern "C" fn(&Object, Sel, id));
                 decl.add_method(
                     sel!(drawRect:),
                     draw_rect as extern "C" fn(&Object, Sel, NSRect),
                 );
                 let my_view_class = decl.register();
                 let custom_view: id = msg_send![my_view_class, new];
+
+                let content_view_cls_name = format!("Display{display}ContentView");
+                let mut content_view = ClassDecl::new(&content_view_cls_name, superclass).unwrap();
+                content_view.add_method(
+                    sel!(mouseDown:),
+                    mouse_down as extern "C" fn(&Object, Sel, id),
+                );
+                content_view
+                    .add_method(sel!(mouseUp:), mouse_up as extern "C" fn(&Object, Sel, id));
+                content_view.add_method(
+                    sel!(mouseDragged:),
+                    mouse_dragged as extern "C" fn(&Object, Sel, id),
+                );
+                let content_view_class = content_view.register();
+                let content_view: id = msg_send![content_view_class, new];
+                window.setContentView_(content_view);
 
                 let now = Instant::now();
                 // 截屏
@@ -153,9 +219,10 @@ fn main() -> anyhow::Result<()> {
                     cocoa::appkit::NSViewWidthSizable | cocoa::appkit::NSViewHeightSizable,
                 );
 
-                image_view.addSubview_(custom_view);
+                // image_view.addSubview_(custom_view);
                 // 将 NSImageView 添加到窗口的内容视图
                 window.contentView().addSubview_(image_view);
+                window.contentView().addSubview_(custom_view);
                 // 设置窗口层级，使其覆盖Dock和菜单栏
                 window.setLevel_(cocoa::appkit::NSMainMenuWindowLevel as i64 + 2);
                 window.setOpaque_(NO);
